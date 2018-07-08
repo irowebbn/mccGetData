@@ -1,5 +1,6 @@
 ﻿#include <stdio.h>
 #include <stdlib.h>
+#include <cstdlib>
 #include <fcntl.h>
 #include <io.h>
 #include <iostream>
@@ -10,6 +11,7 @@
 #define MAX_DEV_COUNT  100
 #define MAX_STR_LENGTH 64
 #define MAX_SCAN_OPTIONS_LENGTH 256
+//#define BUFFERSIZE 10
 
 using namespace std;
 
@@ -80,6 +82,7 @@ int main(int argc, const char *argv[]) {
 	cbIgnoreInstaCal();
 	const char* fileName = "config.txt";
 	SYSTEMTIME st;
+	const long numPoints = 40000*7;
 
 	DaqDeviceDescriptor devDescriptors[MAX_DEV_COUNT];
 	DaqDeviceInterface interfaceType = ANY_IFC;
@@ -87,6 +90,15 @@ int main(int argc, const char *argv[]) {
 	int boardNum = 1;
 	int numDevs = MAX_DEV_COUNT;
 	int detectError = 0;
+	unsigned short dataArray[numPoints];
+
+	//double* dataArray = new double[numPoints];
+	HGLOBAL buffer = cbWinBufAlloc(numPoints);
+	if (buffer == 0) {
+		fprintf(stderr, "Cannot allocate memory\n");
+		system("pause");
+		return -1;
+	}
 
 	// Read config file
 	int fileDesc = _open(fileName, _O_RDONLY);
@@ -172,7 +184,7 @@ int main(int argc, const char *argv[]) {
 	}
 	dataFile.open(dataFileName);
 	dataFile << rate << "\n" << numChan << "\n" << vRange << "\n" << duration << endl;
-	
+
 
 	// Acquire device(s)
 	detectError = cbGetDaqDeviceInventory(interfaceType, devDescriptors, &numDevs);
@@ -232,9 +244,15 @@ int main(int argc, const char *argv[]) {
 	long ratel = (long)rate;
 	long count = numChan * rate * duration * 60;
 
+	//ADData = (WORD*)buffer;
+
 	char outfileStr[] = "DATA00.DAQ";
 	outfileStr[4] = dataFileName[10];
 	outfileStr[5] = dataFileName[11];
+	//ofstream outFile;
+	//outFile.open(outfileStr, std::ofstream::binary);
+	//outFile.open(outfileStr);
+	FILE* outfile = fopen(outfileStr, "ab+");
 
 	int gain = getGain(vRange);
 
@@ -243,13 +261,11 @@ int main(int argc, const char *argv[]) {
 	GetSystemTime(&st);
 	dataFile << st.wHour << ":" << st.wMinute << ":" << st.wSecond << "." << st.wMilliseconds << endl;
 	dataFile.close();
-	detectError = cbFileAInScan(boardNum, LowChan, HighChan, count, &ratel, gain, outfileStr, 0);
+
+	detectError = cbAInScan(boardNum, LowChan, HighChan, numPoints, &ratel, gain, buffer, BACKGROUND | CONTINUOUS);
+	//detectError = cbFileAInScan(boardNum, LowChan, HighChan, count, &ratel, gain, outfileStr, 0);
 	//detectError = cdFileAInScan(int boardnNum, int LowChan, int HighChan, long Count, long *Rate, int Range, char *FileName, int Options)
-	//Calculate the parameters for above using the config file inputs
-	// Add Channels
-	//Configure input range and Rate
-	//Set up trigger
-	//Set up logging mode to save to outfile
+
 	if (detectError != 0) {
 		printf("Couldn't start scan\n");
 		char ErrMsg[ERRSTRLEN];
@@ -258,9 +274,72 @@ int main(int argc, const char *argv[]) {
 		system("pause");
 		return -1;
 	}
+
+	short status = 1;
+	long curCount;
+	long curIndex;
+	long writeIndex = 0;
+	bool ReadLower = true;
+	while (status == 1) {
+		detectError = cbGetStatus(boardNum, &status, &curCount, &curIndex, AIFUNCTION);
+		if ((curIndex > (numPoints / 2)) & ReadLower) {
+			cbWinBufToArray(buffer, dataArray, 0, numPoints / 2);
+			for (int i = 0; i < numPoints/2; i++) {
+					fwrite(&(dataArray[i]), 16, 1, outfile);
+					//outFile << dataArray[dataIndex] << "\t";
+			}
+			ReadLower = false;
+		}
+		else if((curIndex < (numPoints/2)) & !ReadLower){
+			cbWinBufToArray(buffer, dataArray, numPoints/2, numPoints/2);
+			for (int i = 0; i < numPoints / 2; i++) {
+				fwrite(&(dataArray[i]), 16, 1, outfile);
+				//outFile << dataArray[dataIndex] << "\t";
+			}
+			ReadLower = true;
+		}
+			
+	}
+
+	/*
+	while ((status == 1) && (curIndex != -1)) {// Write to file as buffer is being filled
+	detectError = cbGetStatus(boardNum, &status, &curCount, &curIndex, AIFUNCTION);
+	if (detectError != 0) {
+	printf("Couldn't check scan status\n");
+	char ErrMsg[ERRSTRLEN];
+	cbGetErrMsg(detectError, ErrMsg);
+	printf(ErrMsg);
+	system("pause");
+	return -1;
+	}
+	for (int i = writeIndex; i < curIndex; i++) {
+	outFile.write("%d", ADData[i]);
+	}
+	writeIndex = curIndex;
+	}
+
+	//Write out whatever remains in buffer
+	for (int i = writeIndex; i < count; i++) {
+	outFile.write("%d", ADData[i]);
+	}
+	*/
+	fclose(outfile);
+	//outFile.close();
+
+	detectError = cbStopBackground(boardNum, AIFUNCTION);
+	if (detectError != 0) {
+		printf("Couldn't stop background process\n");
+		char ErrMsg[ERRSTRLEN];
+		cbGetErrMsg(detectError, ErrMsg);
+		printf(ErrMsg);
+		system("pause");
+		return -1;
+	}
+
 	printf("Sampling completed.\n");
 	// Write values that were actually recorded to actual.txt
 	//rate has been updated by cdFileAInScan()
+	/*
 	long PreTrigCount = 0;
 	detectError = cbFileGetInfo(outfileStr, &LowChan, &HighChan, &PreTrigCount, &count, &ratel, &gain);
 	if (detectError != 0) {
@@ -274,18 +353,19 @@ int main(int argc, const char *argv[]) {
 	char confirmFileName[] = "CONFIRMDATA00.txt";
 	confirmFileName[11] = outfileStr[4];
 	confirmFileName[12] = outfileStr[5];
-
-	/*
-	_itoa(ratel, rateStr, 10);
-	_itoa((HighChan - LowChan) + 1, numChanStr, 10);
-	_itoa(gain, vRangeStr, 10);
-	_itoa(count / (rate*60), durationStr, 10);
-	*/
+	
+	
+	//_itoa(ratel, rateStr, 10);
+	//_itoa((HighChan - LowChan) + 1, numChanStr, 10);
+	//_itoa(gain, vRangeStr, 10);
+	//_itoa(count / (rate*60), durationStr, 10);
+	
 	duration = (count / (rate * 60));
 	vRange = getvRange(gain);
 	ofstream confirmFile;
 	confirmFile.open(confirmFileName);
 	confirmFile << ratel << "\n" << ((HighChan - LowChan) + 1) << "\n" << vRange << "\n" << duration;
 	confirmFile.close();
+	*/
 	system("pause");
 }
