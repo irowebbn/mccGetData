@@ -252,7 +252,7 @@ int main(int argc, const char *argv[]) {
 	//ofstream outFile;
 	//outFile.open(outfileStr, std::ofstream::binary);
 	//outFile.open(outfileStr);
-	FILE* outfile = fopen(outfileStr, "ab+");
+	FILE* outfile = fopen(outfileStr, "wb+");
 
 	int gain = getGain(vRange);
 
